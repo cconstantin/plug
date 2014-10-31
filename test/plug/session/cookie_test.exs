@@ -15,6 +15,21 @@ defmodule Plug.Session.CookieTest do
   @signing_opts Plug.Session.init(Keyword.put(@default_opts, :encrypt, false))
   @encrypted_opts Plug.Session.init(@default_opts)
 
+  defmodule CustomSerializer do
+    def init(_opts), do: "some opts"
+
+    def encode(%{foo: "bar"}, "some opts"), do: {:ok, "encoded session"}
+    def encode(%{foo: :bar}, "some opts"), do: {:ok, "another encoded session"}
+    def encode(%{}, _), do: {:ok, ""}
+    def encode(_, _), do: :error
+
+    def decode("encoded session", "some opts"), do: {:ok, %{foo: "bar"}}
+    def decode("another encoded session", "some opts"), do: {:ok, %{foo: :bar}}
+    def decode(nil, _), do: {:ok, nil}
+    def decode(_, _), do: :error
+  end
+  @custom_serializer_opts Plug.Session.init(Keyword.put(@default_opts, :serializer, CustomSerializer))
+
   defp sign_conn(conn, secret \\ @secret) do
     put_in(conn.secret_key_base, secret)
     |> Plug.Session.call(@signing_opts)
@@ -24,6 +39,12 @@ defmodule Plug.Session.CookieTest do
   defp encrypt_conn(conn) do
     put_in(conn.secret_key_base, @secret)
     |> Plug.Session.call(@encrypted_opts)
+    |> fetch_session
+  end
+
+  defp custom_serialize_conn(conn) do
+    put_in(conn.secret_key_base, @secret)
+    |> Plug.Session.call(@custom_serializer_opts)
     |> fetch_session
   end
 
@@ -46,6 +67,14 @@ defmodule Plug.Session.CookieTest do
       |> put_session(:foo, "bar")
       |> send_resp(200, "OK")
     end
+  end
+
+  test "uses ETF cookie serializer by default" do
+    assert Plug.Session.init(@default_opts).store_config.serializer == Plug.Session.COOKIE.ETF
+  end
+
+  test "uses custom cookie serializer" do
+    assert @custom_serializer_opts.store_config.serializer == CustomSerializer
   end
 
   ## Signed
@@ -110,5 +139,44 @@ defmodule Plug.Session.CookieTest do
            |> recycle(conn)
            |> encrypt_conn()
            |> get_session(:foo) == nil
+  end
+
+  ## Custom Serializer
+
+  test "session cookies are serialized by the custom serializer" do
+    conn = %{secret_key_base: @secret}
+    cookie = CookieStore.put(conn, nil, %{foo: :bar}, @custom_serializer_opts.store_config)
+    assert is_binary(cookie)
+    assert CookieStore.get(conn, cookie, @custom_serializer_opts.store_config) == {nil, %{foo: :bar}}
+  end
+
+  test "gets and sets custom serialized session cookie" do
+    conn = conn(:get, "/")
+           |> custom_serialize_conn()
+           |> put_session(:foo, "bar")
+           |> send_resp(200, "")
+    assert conn(:get, "/")
+           |> recycle(conn)
+           |> custom_serialize_conn()
+           |> get_session(:foo) == "bar"
+  end
+
+  test "deletes custom serialized session cookie" do
+    conn = conn(:get, "/")
+           |> custom_serialize_conn()
+           |> put_session(:foo, :bar)
+           |> configure_session(drop: true)
+           |> send_resp(200, "")
+    assert conn(:get, "/")
+           |> recycle(conn)
+           |> custom_serialize_conn()
+           |> get_session(:foo) == nil
+  end
+
+  test "converts serializer reference" do
+    opts = Plug.Session.COOKIE.init(@default_opts
+            |> Keyword.put(:serializer, :json)
+            |> Keyword.put(:json_encoder, CustomSerializer))
+    assert opts.serializer == Plug.Session.COOKIE.JSON
   end
 end
