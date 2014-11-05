@@ -30,13 +30,24 @@ defmodule Plug.Session.COOKIE do
 
   * `:encrypt` - specify whether to encrypt cookies, defaults to true.
     When this option is false, the cookie is still signed, meaning it
-    can't be tempered with but its contents can be read
+    can't be tempered with but its contents can be read;
 
   * `:encryption_salt` - a salt used with `conn.secret_key_base` to generate
-    a key for encrypting/decrypting a cookie
+    a key for encrypting/decrypting a cookie;
 
   * `:signing_salt` - a salt used with `conn.secret_key_base` to generate a
-    key for signing/verifying a cookie.
+    key for signing/verifying a cookie;
+
+  * `:key_iterations` - option passed to `Plug.Crypto.KeyGenerator`
+    when generating the encryption and signing keys. Defaults to 1000;
+
+  * `:key_length` - option passed to `Plug.Crypto.KeyGenerator`
+    when generating the encryption and signing keys. Defaults to 32;
+
+  * `:key_digest` - option passed to `Plug.Crypto.KeyGenerator`
+    when generating the encryption and signing keys. Defaults to `:sha256'.
+
+
 
   * `:serializer` - cookie serializer module (defaults to `:etf`).
 
@@ -47,6 +58,7 @@ defmodule Plug.Session.COOKIE do
                          key: "_my_app_session",
                          encryption_salt: "cookie store encryption salt",
                          signing_salt: "cookie store signing salt",
+                         key_length: 64,
                          serializer: :json,
                          json_encoder: Poison
   """
@@ -60,30 +72,46 @@ defmodule Plug.Session.COOKIE do
   def init(opts) do
     encryption_salt = check_encryption_salt(opts)
     signing_salt = check_signing_salt(opts)
+
+    iterations = Keyword.get(opts, :key_iterations, 1000)
+    length = Keyword.get(opts, :key_length, 32)
+    digest = Keyword.get(opts, :key_digest, :sha256)
+    key_opts = [iterations: iterations,
+                length: length,
+                digest: digest,
+                cache: Plug.Keys]
+
     serializer = convert_serializer(opts[:serializer] || :etf)
     serializer_opts = Keyword.drop(opts, [:signing_salt, :encrypt, :encrypt_salt, :serializer])
     serialzer_config = serializer.init(serializer_opts)
 
     %{encryption_salt: encryption_salt,
       signing_salt: signing_salt,
+      key_opts: key_opts,
       serializer: serializer,
       serializer_config: serialzer_config}
   end
 
   def get(conn, cookie, opts) do
+    key_opts = opts.key_opts
     if key = opts.encryption_salt do
-      MessageEncryptor.verify_and_decrypt(cookie, derive(conn, key), derive(conn, opts.signing_salt))
+      MessageEncryptor.verify_and_decrypt(cookie,
+                                          derive(conn, key, key_opts),
+                                          derive(conn, opts.signing_salt, key_opts))
     else
-      MessageVerifier.verify(cookie, derive(conn, opts.signing_salt))
+      MessageVerifier.verify(cookie, derive(conn, opts.signing_salt, key_opts))
     end |> decode(opts.serializer, opts.serializer_config)
   end
 
   def put(conn, _sid, term, opts) do
     binary = encode(term, opts.serializer, opts.serializer_config)
+    key_opts = opts.key_opts
     if key = opts.encryption_salt do
-      MessageEncryptor.encrypt_and_sign(binary, derive(conn, key), derive(conn, opts.signing_salt))
+      MessageEncryptor.encrypt_and_sign(binary,
+                                        derive(conn, key, key_opts),
+                                        derive(conn, opts.signing_salt, key_opts))
     else
-      MessageVerifier.sign(binary, derive(conn, opts.signing_salt))
+      MessageVerifier.sign(binary, derive(conn, opts.signing_salt, key_opts))
     end
   end
 
@@ -107,10 +135,10 @@ defmodule Plug.Session.COOKIE do
   defp decode(:error, _serializer, _serializer_config), do:
     {nil, %{}}
 
-  defp derive(conn, key) do
+  defp derive(conn, key, key_opts) do
     conn.secret_key_base
     |> validate_secret_key_base()
-    |> KeyGenerator.generate(key, cache: Plug.Keys)
+    |> KeyGenerator.generate(key, key_opts)
   end
 
   defp validate_secret_key_base(nil), do:
